@@ -6,7 +6,8 @@ library(DoubletFinder)
 library(dplyr)
 library(ggplot2)
 library(harmony)
-setwd("D:/R/R/PROJECT/IMNM")
+library(tidyr)
+setwd("D:/R/R/PROJECT/IMNM/filterMC")
 load("C:/Users/13067/Downloads/srat.RData")
 #1. Basic QC
 srat[["percent.mt"]] <- PercentageFeatureSet(srat, pattern = "^MT-")
@@ -101,7 +102,7 @@ table(srat$doublet_finder)
 #去除doublet
 srat_clean<-subset(srat, subset = doublet_finder == "Singlet")
 saveRDS(srat_clean, "FAPclean.rds")
-srat<-srat_clean
+srat<-readRDS("D:/R/R/PROJECT/IMNM/filterMC/FAPclean.rds")
 
 #4.再次降维聚类
 srat <- RunUMAP(srat, dims = 1:20)
@@ -116,26 +117,26 @@ DimPlot(srat, reduction = "umap",label = TRUE)
 FeaturePlot(srat, features = "PTPRC",reduction = "umap")
 immune <- subset(srat, subset = PTPRC > 1)
 
-#6.去除muscle contamination
+###6.去除muscle contamination
 #定义markers
-muscle.genes <- c(
-  "MYH1","MYH2","MYH7",
-  "ACTA1","TTN","CKM","TNNT3"
-)
+##muscle.genes <- c(
+# "MYH1","MYH2","MYH7",
+#"ACTA1","TTN","CKM","TNNT3"
+#)
 #计算muscle score
-immune <- AddModuleScore(
-  immune,
-  features = list(muscle.genes),
-  name = "muscle_score"
-)
-FeaturePlot(immune, features = "muscle_score1",reduction = "umap")
+##immune <- AddModuleScore(
+  #immune,
+  #features = list(muscle.genes),
+  #name = "muscle_score"
+#)
+#FeaturePlot(immune, features = "muscle_score1",reduction = "umap")
 
 #过滤高muscle score细胞
-immune <- subset(
-  immune,
-  subset = muscle_score1 < 0.3
-)
-saveRDS(immune, "Immune_cells.rds")
+#immune <- subset(
+ # immune,
+  #subset = muscle_score1 < 0.3
+#)
+#saveRDS(immune, "Immune_cells.rds")
 #7.第三次聚类
 immune <- NormalizeData(immune)
 
@@ -176,35 +177,36 @@ immune <- FindClusters(
   immune,
   resolution = 0.6
 )
-
+saveRDS(immune,"immune_doublet_filtered")
 DimPlot(immune,reduction = "umap",label = T)
 #9.提取巨噬细胞
+exclude_genes<- c("CD3D","CD19","NCAM1","PECAM1")
+FeaturePlot(immune,reduction = "umap",features = exclude_genes,ncol = 2)
+endothelial_markers <- c("PECAM1", "VWF", "CLDN5")
+FeaturePlot(immune, reduction="umap",features = endothelial_markers, order = TRUE)
 
-mac.genes <- c(
-  "C1QA","C1QB","C1QC",
-  "LST1","LYZ","CD68",
-  "TYROBP","AIF1"
+APC_genes <- c(
+  "HLA-DRA","HLA-DRB1","CD74","CIITA"
 )
-dendritic.genes<-c(
-  "FCER1A",
-  "CLEC10A",
-  "ITGAX",
-  "CD1C"
-)
-FeaturePlot(immune,reduction = "umap", features = mac.genes, ncol = 3)
-FeaturePlot(immune,reduction = "umap", features = dendritic.genes, ncol = 2)
+FeaturePlot(immune,reduction = "umap",features = APC_genes,ncol = 2)
 
-#得到巨噬细胞
+
+#得到单核-巨噬细胞subgroup
 Idents(immune) <- "seurat_clusters"
-mac.cluster <- subset(
+mon_mac <- subset(
   immune,
-  idents = c(1,3,4,5,6,8,9)
+  idents = c(1,2,7,11)
 )
 
-mac <- mac.cluster
-saveRDS(mac, "Macrophages_filter.rds")
+saveRDS(mon_mac, "Macrophages_filter.rds")
 #10.巨噬细胞亚组分析聚类
-mac<-readRDS("D:/R/R/PROJECT/IMNM/Macrophages_filter.rds")
+mac<-readRDS("D:/R/R/PROJECT/IMNM/filterMC/Macrophages_filter.rds")
+mac$Antibody<-factor(mac$Antibody)
+mac$Antibody <- if_else(
+  mac$Group == "NDC",
+  "NDC_seronegative",
+  as.character(mac$Antibody)  # 非NDC组保留原组名
+)
 mac <- NormalizeData(mac)
 
 mac <- FindVariableFeatures(mac)
@@ -221,22 +223,47 @@ mac <- FindNeighbors(mac, dims = 1:20)
 
 mac <- FindClusters(mac, resolution = 0.6)
 
-DimPlot(mac, label = TRUE, reduction="umap",pt.size = 1.0)
+DimPlot(mac, label = TRUE, reduction="umap",group.by = "cell_type",pt.size = 1.0)
 DimPlot(mac, label = TRUE, reduction = "tsne", pt.size = 1.0)
 #11. Cells annotation
 mac.markers<-FindAllMarkers(mac,only.pos = T,min.pct = 0.25,logfc.threshold = 0.25)
 mac.markers%>%group_by(cluster) %>% top_n(n=2,wt=avg_log2FC)
 top10<-mac.markers%>%group_by(cluster) %>% top_n(n=10,wt=avg_log2FC)
+top10_table <- top10 %>%
+  filter(cluster %in% 0:10) %>%
+  group_by(cluster) %>%
+  mutate(rank=row_number()) %>%
+  pivot_wider(names_from = cluster,
+  values_from = gene)
+write.csv(top10_table, "cluster_top10_table.csv", row.names=FALSE)
 DoHeatmap(mac,features = top10$gene)+NoLegend()
-#进行注释
 #病种比较
 DimPlot(mac, 
         reduction = "umap", 
-        group.by = "seurat_clusters", 
+        group.by = "cell_type", 
         split.by = "Group", 
-        label = TRUE, 
+        label = F, 
         repel = TRUE,
         ncol = 2)
+#血清型比较
+DimPlot(mac, 
+        reduction = "umap", 
+        group.by = "cell_type", 
+        split.by = "Antibody", 
+        label = F, 
+        repel = TRUE,
+        ncol = 3)
+#dendritic cells
+dendritic.genes<-c(
+  "ZBTB46",
+  "CLEC9A",
+  "CD1C",
+  "FCER1A",
+  "CLEC10A",
+  "ITGAX"
+)
+FeaturePlot(mac,reduction = "umap",pt.size = 1.0,
+            features = dendritic.genes, ncol=3)
 #resident_macrophages
 FeaturePlot(mac, reduction = "umap", pt.size = 1.0, 
             features = c("C1QA","C1QB","C1QC",
@@ -274,13 +301,6 @@ DotPlot(mac,
   RotatedAxis() + # 旋转X轴标签，避免重叠
   scale_color_gradient2(low = "blue", mid = "white", high = "red") + # 自定义颜色
   labs(x = "Gene", y = "Antibody Group", title = "MHC-II gene expression across Antibody subtypes")
-#和NDC做比较
-mac$Antibody<-factor(mac$Antibody)
-mac$Antibody <- if_else(
-  mac$Group == "NDC",
-  "NDC_seronegative",
-  as.character(mac$Antibody)  # 非NDC组保留原组名
-)
 # 查看各组的细胞数
 table(mac$Antibody)
 #Phagocytic / debris-clearing macrophage
@@ -291,22 +311,27 @@ FeaturePlot(mac,features = c("GPNMB","SPP1","TREM2",
 FeaturePlot(mac,features = c("MRC1","CD163","IGF1",
                              "TGFB1","SPP1"),
             reduction = "umap", pt.size = 1.0,ncol = 3)
-FeaturePlot(mac, reduction = "umap",features = dendritic.genes
-)
 #注释annotation
 mac$cell_type<-"Uknown"
-mac$cell_type[mac$seurat_clusters%in%c(3)]<-"SPP1 macrophages"
-mac$cell_type[mac$seurat_clusters%in%c(2)]<-"monocytes"
-mac$cell_type[mac$seurat_clusters%in%c(1)]<-"resident macrophages"
-mac$cell_type[mac$seurat_clusters%in%c(0)]<-"inflammatory macrophages"
-mac$cell_type[mac$seurat_clusters%in%c(5)]<-"Interferon-activated macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(0)]<-"Resident macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(1)]<-"SPP1+ Phagocytic macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(2)]<-"monocyte"
+mac$cell_type[mac$seurat_clusters%in%c(3)]<-"MACRO+ macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(4)]<-"Inflammatory macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(5)]<-"T cells"
 mac$cell_type[mac$seurat_clusters%in%c(6)]<-"proliferating macrophages"
-mac$cell_type[mac$seurat_clusters%in%c(8)]<-"proliferating CD8 T cell"
-mac$cell_type[mac$seurat_clusters%in%c(4)]<-"FAPs"
-mac$cell_type[mac$seurat_clusters%in%c(7)]<-"dendritic cells"
-
-top10_cluster2<- top10[top10$cluster==2,]
-print(top10_cluster2$gene)
+mac$cell_type[mac$seurat_clusters%in%c(7)]<-"Plasma cells"
+mac$cell_type[mac$seurat_clusters%in%c(8)]<-"cDC1 dendritic cells"
+mac$cell_type[mac$seurat_clusters%in%c(9)]<-"activated dendritic cells"
+mac$cell_type[mac$seurat_clusters%in%c(10)]<-"MHC-II high dendritic cell"
+library(tidyr)
+top10_table <- top10 %>%
+  filter(cluster %in% 0:9) %>%
+  group_by(cluster) %>%
+  mutate(rank=row_number()) %>%
+  pivot_wider(names_from = cluster,
+              values_from = gene)
+write.csv(top10_table, "cluster_top10_table.csv", row.names=FALSE)
 
 #12.Go analysis
 # 按 cluster 拆分基因列表
@@ -375,24 +400,46 @@ cnetplot(go_results_sim,
 
 
 #heatmap
-# 1. 筛选至少在一个 cluster 中显著的 GO term
-sig_terms <- comp_ego@compareClusterResult %>%
-  filter(p.adjust < 0.05) %>%
-  pull(Description) %>%
-  unique()
+# 提取结果表格
+result_df <- comp_ego@compareClusterResult
 
-# 2. 如果还是太多，取每个 cluster 的 top 10
-top10_terms <- comp_ego@compareClusterResult %>%
+# 选择需要的列：Cluster, Description, p.adjust
+df_sub <- result_df[, c("Cluster", "Description", "p.adjust")]
+
+# 计算 -log10(p.adjust)，便于热图着色
+df_sub$logP <- -log10(df_sub$p.adjust)
+
+# 转换为宽格式：每一行是一个通路（Description），每一列是一个 Cluster
+library(tidyr)
+wide_df <- df_sub %>%
+  dplyr::select(Cluster, Description, logP) %>%
+  pivot_wider(names_from = Cluster, values_from = logP, values_fill = 0)
+
+# 将通路名作为行名，删除通路名列
+mat <- as.matrix(wide_df[, -1])
+rownames(mat) <- wide_df$Description
+
+# 检查矩阵维度
+dim(mat)
+# 提取每个 cluster 的 top 10 通路（按 p.adjust 升序）
+top10_terms <- result_df %>%
   group_by(Cluster) %>%
-  slice_min(order_by = p.adjust, n = 10) %>%
+  arrange(p.adjust) %>%
+  slice_head(n = 10) %>%
   pull(Description) %>%
-  unique()
+  unique()   # 去重
 
+# 用这些通路筛选矩阵
 mat_filt <- mat[rownames(mat) %in% top10_terms, ]
 
-# 3. 绘制heatmap
+# 查看筛选后的维度
+dim(mat_filt)
+saveRDS(mat_filt, "mat_filt.rds")
+#pheatmap
+library(pheatmap)
+mat_filt<- readRDS("mat_filt.rds")
 pheatmap(mat_filt,
-         color = colorRampPalette(c( "grey","yellow", "firebrick3"))(50),
+         color = colorRampPalette(c("grey", "yellow", "firebrick3"))(50),
          border_color = NA,
          cluster_rows = TRUE,
          cluster_cols = TRUE,

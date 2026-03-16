@@ -1,0 +1,404 @@
+library(Seurat)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(DoubletFinder)
+library(dplyr)
+library(ggplot2)
+library(harmony)
+setwd("D:/R/R/PROJECT/IMNM")
+load("C:/Users/13067/Downloads/srat.RData")
+#1. Basic QC
+srat[["percent.mt"]] <- PercentageFeatureSet(srat, pattern = "^MT-")
+VlnPlot(srat, features = c("nFeature_RNA","nCount_RNA","percent.mt"), ncol = 3)
+srat <- subset(
+  srat,
+  subset =
+    nFeature_RNA > 300 &
+    nFeature_RNA < 6000 &
+    nCount_RNA > 500 &
+    percent.mt < 5
+)
+#2. Normalization
+srat <- NormalizeData(srat)
+
+srat <- FindVariableFeatures(
+  srat,
+  selection.method = "vst",
+  nfeatures = 2000
+)
+
+srat <- ScaleData(srat)
+
+srat <- RunPCA(srat, npcs = 30)
+saveRDS(srat,"Pipeline_srat.rds")
+#3. Doublet delete
+#关键修正：Seurat v5 必须执行 JoinLayers 才能兼容老插件
+#srat <- readRDS("Pipeline_srat.rds")
+# 假设细胞名是用 "_" 分隔的，第一部分是样本名
+srat$orig.ident <- sapply(strsplit(colnames(srat), "_"), `[`, 1)
+
+# 检查一下现在每个样本有多少细胞
+table(srat$orig.ident)
+# 确保层已合并
+srat <- JoinLayers(srat)
+
+# 获取所有独立的样本 ID（你刚才 table 出来的那些：ASY2, IBM1, IBM2...）
+sample_ids <- unique(srat$orig.ident)
+
+# 1. 预先初始化结果容器（在循环外）
+srat$doublet_finder <- "Singlet"
+sample_ids <- unique(srat$orig.ident)
+
+for (sid in sample_ids) {
+  cat("\n-----------------------------------\n")
+  cat("Processing Sample:", sid, "\n")
+  
+  # 2. 【核心修复】不使用 subset，而是重新创建一个“干净”的 Seurat 对象
+  # 这样可以彻底切断 v5 对象复杂的元数据关联
+  tmp_counts <- GetAssayData(srat, layer = "counts")[, srat$orig.ident == sid]
+  srat_grp <- CreateSeuratObject(counts = tmp_counts)
+  
+  # 3. 标准预处理（DoubletFinder 必须在局部空间运行）
+  srat_grp <- NormalizeData(srat_grp, verbose = FALSE)
+  srat_grp <- FindVariableFeatures(srat_grp, verbose = FALSE)
+  srat_grp <- ScaleData(srat_grp, verbose = FALSE)
+  srat_grp <- RunPCA(srat_grp, verbose = FALSE)
+  
+  # 4. 参数扫描 (pK)
+  sweep.res <- paramSweep(srat_grp, PCs = 1:20, sct = FALSE)
+  sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)
+  bcmvn <- find.pK(sweep.stats)
+  
+  # 【手动提取 pK，防止数据框报错】
+  pk_metric <- as.numeric(as.character(bcmvn$BCmetric))
+  pk_list <- as.numeric(as.character(bcmvn$pK))
+  pK_opt <- pk_list[which.max(pk_metric)]
+  cat("Optimal pK found:", pK_opt, "\n")
+  
+  # 5. 计算预期双细胞数
+  n_cells <- ncol(srat_grp)
+  rate <- (n_cells / 1000) * 0.008
+  nExp <- round(n_cells * rate)
+  
+  # 6. 运行 DoubletFinder
+  srat_grp <- doubletFinder(srat_grp, PCs = 1:20, pN = 0.25, pK = pK_opt, nExp = nExp, sct = FALSE)
+  
+  # 7. 提取结果并写回原对象
+  df_col <- grep("DF.classifications", colnames(srat_grp@meta.data), value = TRUE)[1]
+  # 转化为纯字符向量，确保没有属性污染
+  res_vector <- as.character(srat_grp@meta.data[[df_col]])
+  names(res_vector) <- colnames(srat_grp)
+  
+  # 使用 match 安全赋值
+  srat$doublet_finder[match(names(res_vector), colnames(srat))] <- res_vector
+  
+  cat("Sample", sid, "done. Found", sum(res_vector == "Doublet"), "doublets.\n")
+}
+
+# 最后检查
+table(srat$doublet_finder)
+#去除doublet
+srat_clean<-subset(srat, subset = doublet_finder == "Singlet")
+saveRDS(srat_clean, "FAPclean.rds")
+srat<-srat_clean
+
+#4.再次降维聚类
+srat <- RunUMAP(srat, dims = 1:20)
+
+srat <- FindNeighbors(srat, dims = 1:20)
+
+srat <- FindClusters(srat, resolution = 0.5)
+
+DimPlot(srat, reduction = "umap",label = TRUE)
+
+#5.提取CD45+免疫细胞
+FeaturePlot(srat, features = "PTPRC",reduction = "umap")
+immune <- subset(srat, subset = PTPRC > 1)
+
+#6.去除muscle contamination
+#定义markers
+muscle.genes <- c(
+  "MYH1","MYH2","MYH7",
+  "ACTA1","TTN","CKM","TNNT3"
+)
+#计算muscle score
+immune <- AddModuleScore(
+  immune,
+  features = list(muscle.genes),
+  name = "muscle_score"
+)
+FeaturePlot(immune, features = "muscle_score1",reduction = "umap")
+
+#过滤高muscle score细胞
+immune <- subset(
+  immune,
+  subset = muscle_score1 < 0.3
+)
+saveRDS(immune, "Immune_cells.rds")
+#7.第三次聚类
+immune <- NormalizeData(immune)
+
+immune <- FindVariableFeatures(immune)
+
+immune <- ScaleData(immune)
+
+immune <- RunPCA(immune)
+
+immune <- RunUMAP(immune, dims = 1:20)
+
+immune <- FindNeighbors(immune, dims = 1:20)
+
+immune <- FindClusters(immune, resolution = 0.6)
+
+DimPlot(immune, reduction = "umap",label = TRUE)
+#8.harmony聚类
+srat <- RunPCA(srat, npcs = 30)
+
+immune <- RunHarmony(
+  immune,
+  group.by.vars = "Sample"
+)
+#harmony聚类
+immune <- RunUMAP(
+  immune,
+  reduction = "harmony",
+  dims = 1:20
+)
+
+immune <- FindNeighbors(
+  immune,
+  reduction = "harmony",
+  dims = 1:20
+)
+
+immune <- FindClusters(
+  immune,
+  resolution = 0.6
+)
+
+DimPlot(immune,reduction = "umap",label = T)
+#9.提取巨噬细胞
+
+mac.genes <- c(
+  "C1QA","C1QB","C1QC",
+  "LST1","LYZ","CD68",
+  "TYROBP","AIF1"
+)
+dendritic.genes<-c(
+  "FCER1A",
+  "CLEC10A",
+  "ITGAX",
+  "CD1C"
+)
+FeaturePlot(immune,reduction = "umap", features = mac.genes, ncol = 3)
+FeaturePlot(immune,reduction = "umap", features = dendritic.genes, ncol = 2)
+
+#得到巨噬细胞
+Idents(immune) <- "seurat_clusters"
+mac.cluster <- subset(
+  immune,
+  idents = c(1,3,4,5,6,8,9)
+)
+
+mac <- mac.cluster
+saveRDS(mac, "Macrophages_filter.rds")
+#10.巨噬细胞亚组分析聚类
+mac<-readRDS("D:/R/R/PROJECT/IMNM/Macrophages_filter.rds")
+mac <- NormalizeData(mac)
+
+mac <- FindVariableFeatures(mac)
+
+mac <- ScaleData(mac)
+
+mac <- RunPCA(mac)
+
+mac <- RunUMAP(mac, dims = 1:20)
+
+mac <- RunTSNE(mac, dims = 1:20)
+
+mac <- FindNeighbors(mac, dims = 1:20)
+
+mac <- FindClusters(mac, resolution = 0.6)
+
+DimPlot(mac, label = TRUE, reduction="umap",pt.size = 1.0)
+DimPlot(mac, label = TRUE, reduction = "tsne", pt.size = 1.0)
+#11. Cells annotation
+mac.markers<-FindAllMarkers(mac,only.pos = T,min.pct = 0.25,logfc.threshold = 0.25)
+mac.markers%>%group_by(cluster) %>% top_n(n=2,wt=avg_log2FC)
+top10<-mac.markers%>%group_by(cluster) %>% top_n(n=10,wt=avg_log2FC)
+DoHeatmap(mac,features = top10$gene)+NoLegend()
+#进行注释
+#病种比较
+DimPlot(mac, 
+        reduction = "umap", 
+        group.by = "seurat_clusters", 
+        split.by = "Group", 
+        label = TRUE, 
+        repel = TRUE,
+        ncol = 2)
+#resident_macrophages
+FeaturePlot(mac, reduction = "umap", pt.size = 1.0, 
+            features = c("C1QA","C1QB","C1QC",
+                         "FOLR2","LYVE1","CD163"),
+            ncol = 3)
+#monocyte_derived_macrophages
+FeaturePlot(mac, reduction = "umap", pt.size = 1.0, 
+            features = c("S100A8","S100A9","VCAN",
+                         "LST1","FCN1","CCR2"),
+            ncol = 3)
+#Inflammatory macrophage
+FeaturePlot(mac,features = c("IL1B","NLRP3","CXCL8",
+                             "CCL3","CCL4","PTGS2"),
+            reduction = "umap", pt.size = 1.0,ncol = 3)
+#Interferon-activated macrophage
+FeaturePlot(mac,features = c("MX1","OAS1","OAS2",
+                             "STAT1","CXCL10","GBP1"),
+            reduction = "umap", pt.size = 1.0,ncol = 3)
+#Antigen-presenting macrophage                             
+mhc_2_genes<-c("HLA-DRA","HLA-DRB1","HLA-DPA1",
+               "HLA-DPB1","CD74","CIITA")
+FeaturePlot(mac,features = mhc_2_genes,
+            reduction = "umap", pt.size = 1.0,ncol = 3)
+#比较病种间差异
+DotPlot(mac, 
+        features = mhc_2_genes, 
+        group.by = "Group") + 
+  RotatedAxis() + # 旋转X轴标签，避免重叠
+  scale_color_gradient2(low = "blue", mid = "white", high = "red") + # 自定义颜色
+  labs(x = "Gene", y = "Disease Group", title = "MHC-II gene expression across IIM subtypes")
+#比较血清型间MHC-II
+DotPlot(mac, 
+        features = mhc_2_genes, 
+        group.by = "Antibody") + 
+  RotatedAxis() + # 旋转X轴标签，避免重叠
+  scale_color_gradient2(low = "blue", mid = "white", high = "red") + # 自定义颜色
+  labs(x = "Gene", y = "Antibody Group", title = "MHC-II gene expression across Antibody subtypes")
+#和NDC做比较
+mac$Antibody<-factor(mac$Antibody)
+mac$Antibody <- if_else(
+  mac$Group == "NDC",
+  "NDC_seronegative",
+  as.character(mac$Antibody)  # 非NDC组保留原组名
+)
+# 查看各组的细胞数
+table(mac$Antibody)
+#Phagocytic / debris-clearing macrophage
+FeaturePlot(mac,features = c("GPNMB","SPP1","TREM2",
+                             "APOE","CTSB","LGALS3"),
+            reduction = "umap", pt.size = 1.0,ncol = 3)
+#Pro-repair macrophage
+FeaturePlot(mac,features = c("MRC1","CD163","IGF1",
+                             "TGFB1","SPP1"),
+            reduction = "umap", pt.size = 1.0,ncol = 3)
+FeaturePlot(mac, reduction = "umap",features = dendritic.genes
+)
+#注释annotation
+mac$cell_type<-"Uknown"
+mac$cell_type[mac$seurat_clusters%in%c(3)]<-"SPP1 macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(2)]<-"monocytes"
+mac$cell_type[mac$seurat_clusters%in%c(1)]<-"resident macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(0)]<-"inflammatory macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(5)]<-"Interferon-activated macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(6)]<-"proliferating macrophages"
+mac$cell_type[mac$seurat_clusters%in%c(8)]<-"proliferating CD8 T cell"
+mac$cell_type[mac$seurat_clusters%in%c(4)]<-"FAPs"
+mac$cell_type[mac$seurat_clusters%in%c(7)]<-"dendritic cells"
+
+top10_cluster2<- top10[top10$cluster==2,]
+print(top10_cluster2$gene)
+
+#12.Go analysis
+# 按 cluster 拆分基因列表
+gene_list<-split(mac.markers$gene,mac.markers$cluster)
+# 将每个列表中的 SYMBOL 转换为 ENTREZ ID
+gene_entrez <- lapply(gene_list, function(genes) {
+  bitr(genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)$ENTREZID
+})
+# 注意：compareCluster 要求输入是命名列表（cluster 名为元素名）
+comp_ego <- compareCluster(geneCluster = gene_entrez,
+                           fun = enrichGO,
+                           OrgDb = org.Hs.eg.db,
+                           ont = "BP",
+                           pvalueCutoff = 0.05,
+                           qvalueCutoff = 0.2,
+                           readable = TRUE)
+
+# 查看结果
+head(comp_ego)
+go_simplified <- simplify(comp_ego, 
+                          cutoff = 0.7, 
+                          by = "p.adjust", 
+                          select_fun = min)
+# 保存结果（可选）
+saveRDS(comp_ego, "D:/R/R/PROJECT/IMNM/filterMC/mac_GO_BP.rds")
+saveRDS(go_simplified,"D:/R/R/PROJECT/IMNM/filterMC/Sim_GO_BP.rds")
+comp_ego<- readRDS("D:/R/R/PROJECT/IMNM/filterMC/mac_GO_BP.rds")
+go_simplified<- readRDS("D:/R/R/PROJECT/IMNM/filterMC/Sim_GO_BP.rds")
+# 必须先计算相似度
+go_results_sim <- pairwise_termsim(comp_ego)
+go_results_reduced <- simplify(go_results_sim, 
+                               cutoff = 0.5, 
+                               by = "p.adjust", 
+                               select_fun = min)
+go_df <- as.data.frame(go_results_reduced)
+go_top5 <- go_df %>%
+  group_by(Cluster) %>%
+  slice_min(order_by = p.adjust, n = 5, with_ties = FALSE) %>%
+  ungroup()
+
+# 检查一下现在剩下多少个，如果剩下 20-30 个，图就会非常漂亮
+nrow(go_results_reduced@compareClusterResult)
+#可视化 GO 结果
+#dotplot
+p<-dotplot(go_simplified, showCategory = 5) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+library(stringr)
+p + scale_y_discrete(labels = function(x) str_wrap(x, width = 200))
+#简化到top5
+dotplot(go_results_reduced, showCategory = NULL) + 
+  aes(y = factor(Description, levels = rev(unique(go_top5$Description)))) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 45)) + # 自动折行
+  theme(axis.text.y = element_text(size = 8))
+
+# cnetplot
+# 只选前 30 个最显著的画网络图，避免线条过密
+# 1. 确保计算了相似度（如果之前跑过可以跳过）
+gene_list <- mac.markers$avg_log2FC
+names(gene_list) <- rownames(mac.markers)
+
+cnetplot(go_results_sim, 
+         showCategory = 5, 
+         foldChange = gene_list) + 
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0)
+
+
+
+#heatmap
+# 1. 筛选至少在一个 cluster 中显著的 GO term
+sig_terms <- comp_ego@compareClusterResult %>%
+  filter(p.adjust < 0.05) %>%
+  pull(Description) %>%
+  unique()
+
+# 2. 如果还是太多，取每个 cluster 的 top 10
+top10_terms <- comp_ego@compareClusterResult %>%
+  group_by(Cluster) %>%
+  slice_min(order_by = p.adjust, n = 10) %>%
+  pull(Description) %>%
+  unique()
+
+mat_filt <- mat[rownames(mat) %in% top10_terms, ]
+
+# 3. 绘制heatmap
+pheatmap(mat_filt,
+         color = colorRampPalette(c( "grey","yellow", "firebrick3"))(50),
+         border_color = NA,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         fontsize_row = 7,
+         fontsize_col = 10,
+         main = "GO enrichment (top 10 per cluster)",
+         filename = "GO_heatmap.pdf",
+         width = 9,
+         height = 10)

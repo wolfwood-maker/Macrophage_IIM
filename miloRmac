@@ -1,0 +1,93 @@
+setwd("D:/R/R/PROJECT/IMNM/Milo")
+#1.
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(miloR)
+library(patchwork)
+library(SingleCellExperiment)
+immune<-readRDS("D:/R/R/PROJECT/IMNM/filterMC/immune_harmony.rds")
+mac<-readRDS("D:/R/R/PROJECT/IMNM/filterMC/Macrophages_filter.rds")
+# 转换
+harmony.emb <- Embeddings(mac, "harmony")
+sce <- as.SingleCellExperiment(mac)
+reducedDim(sce, "harmony") <- harmony.emb
+milo <- Milo(sce)
+
+# 使用 harmony embedding（你之前做过）
+milo <- buildGraph(
+  milo,
+  k = 30,
+  d = 17,
+  reduced.dim = "harmony"
+)
+reducedDim(sce, "harmony") <- reducedDim(sce, "HARMONY")
+reducedDim(sce, "HARMONY") <- NULL
+#build neighborhood
+milo <- makeNhoods(
+  milo,
+  prop = 0.1,
+  k = 30,
+  d = 17,
+  refined = TRUE
+)
+#count cells
+milo <- countCells(
+  milo,
+  meta.data = colData(milo),
+  sample = "Sample"
+)
+#构建设计矩阵
+ #Group compare
+design.df <- unique(colData(milo)[, c("Sample", "Group")])
+rownames(design.df) <- design.df$Sample
+ 
+ #IMNM Antibody compare
+milo.imnm <- milo[, milo$Group == "IMNM"]
+
+design.df.imnm <- unique(colData(milo.imnm)[, c("Sample", "Antibody")])
+rownames(design.df.imnm) <- design.df.imnm$Sample
+
+ #IBM Antibody compare
+milo.ibm <- milo[, milo$Group == "IBM"]
+
+design.df.ibm <- unique(colData(milo.ibm)[, c("Sample", "Antibody")])
+rownames(design.df.ibm) <- design.df.ibm$Sample
+
+#DA testing and visualization
+ #Group
+da.group <- testNhoods(
+  milo,
+  design = ~ Group,
+  design.df = design.df
+)
+milo <- buildNhoodGraph(milo)
+#作图
+plotNhoodGraphDA(
+  milo,
+  da.group,
+  alpha = 0.1
+)
+#project Nhood to umap
+# 从 Seurat 对象 mac 中提取 UMAP 坐标（您已做）
+umap_coords <- Embeddings(mac, "umap")
+umap_coords <- umap_coords[colnames(milo), ]
+reducedDim(milo, "UMAP") <- umap_coords
+
+# 投射差异丰度结果到 UMAP
+plotNhoodGraphDA(
+  milo,
+  da.group,               # 您 testNhoods 的结果（假设变量名是 da_group）
+  alpha = 0.05,                     # 可选：只显示 FDR<0.05 的显著邻域
+  reduced.dim = "UMAP"
+) + 
+  labs(title = "DA neighborhoods projected on UMAP")
+#方法二：手动投射
+design = ~ Group
+da.ibm_vs_imnm <- testNhoods(
+  milo,
+  design = ~ Group,
+  design.df = design.df,
+  model.contrasts = c("GroupIBM - GroupIMNM")
+)

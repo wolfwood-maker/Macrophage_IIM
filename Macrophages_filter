@@ -116,7 +116,7 @@ DimPlot(srat, reduction = "umap",label = TRUE)
 #5.提取CD45+免疫细胞
 FeaturePlot(srat, features = "PTPRC",reduction = "umap")
 immune <- subset(srat, subset = PTPRC > 1)
-
+saveRDS(immune, "immune.rds")
 ###6.去除muscle contamination
 #定义markers
 ##muscle.genes <- c(
@@ -137,23 +137,9 @@ immune <- subset(srat, subset = PTPRC > 1)
   #subset = muscle_score1 < 0.3
 #)
 #saveRDS(immune, "Immune_cells.rds")
-#7.第三次聚类
-immune <- NormalizeData(immune)
-
-immune <- FindVariableFeatures(immune)
-
-immune <- ScaleData(immune)
-
-immune <- RunPCA(immune)
-
-immune <- RunUMAP(immune, dims = 1:20)
-
-immune <- FindNeighbors(immune, dims = 1:20)
-
-immune <- FindClusters(immune, resolution = 0.6)
-
-DimPlot(immune, reduction = "umap",label = TRUE)
 #8.harmony聚类
+immune<-readRDS("immune.rds")
+
 srat <- RunPCA(srat, npcs = 30)
 
 immune <- RunHarmony(
@@ -161,27 +147,33 @@ immune <- RunHarmony(
   group.by.vars = "Sample"
 )
 #harmony聚类
+ElbowPlot(immune,reduction = "harmony")
 immune <- RunUMAP(
   immune,
   reduction = "harmony",
-  dims = 1:20
+  dims = 1:15
 )
 
 immune <- FindNeighbors(
   immune,
   reduction = "harmony",
-  dims = 1:20
+  dims = 1:15
 )
 
 immune <- FindClusters(
   immune,
-  resolution = 0.6
+  resolution = 0.5
 )
-saveRDS(immune,"immune_doublet_filtered")
+
 DimPlot(immune,reduction = "umap",label = T)
+saveRDS(immune,"immune_harmony.rds")
+immune<-readRDS("immune_harmony.rds")
 #9.提取巨噬细胞
-exclude_genes<- c("CD3D","CD19","NCAM1","PECAM1")
+exclude_genes<- c("CD3D","CD19","MS4A1","IGHA1")
 FeaturePlot(immune,reduction = "umap",features = exclude_genes,ncol = 2)
+T_genes<-c("CD3D","SKAP1","THEMIS","ITK")
+FeaturePlot(immune,reduction = "umap",features = T_genes,ncol = 2)
+
 endothelial_markers <- c("PECAM1", "VWF", "CLDN5")
 FeaturePlot(immune, reduction="umap",features = endothelial_markers, order = TRUE)
 
@@ -189,24 +181,49 @@ APC_genes <- c(
   "HLA-DRA","HLA-DRB1","CD74","CIITA"
 )
 FeaturePlot(immune,reduction = "umap",features = APC_genes,ncol = 2)
-
-
+FeaturePlot(immune,reduction = "umap",features = c("ITGAM","ITGAX"),pt.size = 1.0,ncol = 2)
+FeaturePlot(immune,reduction = "umap",features = c("MKI67"),pt.size = 1.0,ncol = 1)
 #得到单核-巨噬细胞subgroup
+#分离MKI67+ cells
+Idents(immune) <- "seurat_clusters"
+mki67_cells<- subset(immune,
+                     idents=c(9))
+mki67_cells <- NormalizeData(mki67_cells)
+
+mki67_cells <- FindVariableFeatures(mki67_cells)
+
+mki67_cells <- ScaleData(mki67_cells)
+
+mki67_cells <- RunPCA(mki67_cells)
+
+ElbowPlot(mki67_cells,reduction = "pca")
+
+mki67_cells <- RunUMAP(mki67_cells, dims = 1:10)
+
+mki67_cells <- RunTSNE(mki67_cells, dims = 1:10)
+
+mki67_cells <- FindNeighbors(mki67_cells, dims = 1:10)
+
+mki67_cells <- FindClusters(mki67_cells, resolution = 0.5)
+
+DimPlot(mki67_cells, label = TRUE, reduction="umap",pt.size = 1.0)
+
+FeaturePlot(mki67_cells,reduction = "umap",features = T_genes)
+Idents(mki67_cells)<- "seurat_clusters"
+mki_mac <- subset(mki67_cells,idents=c(0))
+macs_mki<- colnames(mki_mac)
+#
 Idents(immune) <- "seurat_clusters"
 mon_mac <- subset(
   immune,
-  idents = c(1,2,7,11)
+  idents = c(1,2,3,4,13)
 )
-
+cells_other<-colnames(mon_mac)
+mac_all<- c(macs_mki, cells_other)
+mon_mac<-subset(immune, cells= mac_all)
 saveRDS(mon_mac, "Macrophages_filter.rds")
 #10.巨噬细胞亚组分析聚类
 mac<-readRDS("D:/R/R/PROJECT/IMNM/filterMC/Macrophages_filter.rds")
-mac$Antibody<-factor(mac$Antibody)
-mac$Antibody <- if_else(
-  mac$Group == "NDC",
-  "NDC_seronegative",
-  as.character(mac$Antibody)  # 非NDC组保留原组名
-)
 mac <- NormalizeData(mac)
 
 mac <- FindVariableFeatures(mac)
@@ -215,22 +232,48 @@ mac <- ScaleData(mac)
 
 mac <- RunPCA(mac)
 
-mac <- RunUMAP(mac, dims = 1:20)
+ElbowPlot(mac,reduction = "pca")
 
-mac <- RunTSNE(mac, dims = 1:20)
+mac <- RunUMAP(mac, dims = 1:17)
 
-mac <- FindNeighbors(mac, dims = 1:20)
+mac <- RunTSNE(mac, dims = 1:17)
 
-mac <- FindClusters(mac, resolution = 0.6)
+mac <- FindNeighbors(mac, dims = 1:17)
 
-DimPlot(mac, label = TRUE, reduction="umap",group.by = "cell_type",pt.size = 1.0)
+mac <- FindClusters(mac, resolution = 0.5)
+
+DimPlot(mac, label = TRUE, reduction="umap",pt.size = 1.0)
 DimPlot(mac, label = TRUE, reduction = "tsne", pt.size = 1.0)
+#去掉污染细胞
+Idents(mac)<- "seurat_clusters"
+mac<-subset(mac,idents=c(0,1,2,3,4,6,9))
+saveRDS(mac,"Macrophages_filter.rds")
+mac<-readRDS("Macrophages_filter.rds")
+mac <- NormalizeData(mac)
+
+mac <- FindVariableFeatures(mac)
+
+mac <- ScaleData(mac)
+
+mac <- RunPCA(mac)
+
+ElbowPlot(mac,reduction = "pca")
+
+mac <- RunUMAP(mac, dims = 1:17)
+
+mac <- RunTSNE(mac, dims = 1:17)
+
+mac <- FindNeighbors(mac, dims = 1:17)
+
+mac <- FindClusters(mac, resolution = 0.5)
+
+DimPlot(mac, label = TRUE, reduction="umap",pt.size = 1.0)
 #11. Cells annotation
 mac.markers<-FindAllMarkers(mac,only.pos = T,min.pct = 0.25,logfc.threshold = 0.25)
 mac.markers%>%group_by(cluster) %>% top_n(n=2,wt=avg_log2FC)
 top10<-mac.markers%>%group_by(cluster) %>% top_n(n=10,wt=avg_log2FC)
 top10_table <- top10 %>%
-  filter(cluster %in% 0:10) %>%
+  filter(cluster %in% 0:7) %>%
   group_by(cluster) %>%
   mutate(rank=row_number()) %>%
   pivot_wider(names_from = cluster,
@@ -246,6 +289,7 @@ DimPlot(mac,
         repel = TRUE,
         ncol = 2)
 #血清型比较
+table(mac$Group, mac$Antibody, useNA = "ifany")
 DimPlot(mac, 
         reduction = "umap", 
         group.by = "cell_type", 
@@ -253,6 +297,24 @@ DimPlot(mac,
         label = F, 
         repel = TRUE,
         ncol = 3)
+#IMNM内部比较
+imnm_cells <- subset(mac, subset = Group == "IMNM")
+DimPlot(imnm_cells, 
+        repel = T,
+        label = F,
+        reduction = "umap", 
+        group.by = "cell_type", 
+        split.by = "Antibody",
+        ncol = 2) 
+#IBM内部比较
+ibm_cells <- subset(mac, subset = Group == "IBM")
+DimPlot(ibm_cells, 
+        repel = T,
+        label = F,
+        reduction = "umap", 
+        group.by = "cell_type", 
+        split.by = "Antibody",
+        ncol = 2) 
 #dendritic cells
 dendritic.genes<-c(
   "ZBTB46",
@@ -313,25 +375,15 @@ FeaturePlot(mac,features = c("MRC1","CD163","IGF1",
             reduction = "umap", pt.size = 1.0,ncol = 3)
 #注释annotation
 mac$cell_type<-"Uknown"
-mac$cell_type[mac$seurat_clusters%in%c(0)]<-"Resident macrophages"
-mac$cell_type[mac$seurat_clusters%in%c(1)]<-"SPP1+ Phagocytic macrophages"
-mac$cell_type[mac$seurat_clusters%in%c(2)]<-"monocyte"
-mac$cell_type[mac$seurat_clusters%in%c(3)]<-"MACRO+ macrophages"
-mac$cell_type[mac$seurat_clusters%in%c(4)]<-"Inflammatory macrophages"
-mac$cell_type[mac$seurat_clusters%in%c(5)]<-"T cells"
-mac$cell_type[mac$seurat_clusters%in%c(6)]<-"proliferating macrophages"
-mac$cell_type[mac$seurat_clusters%in%c(7)]<-"Plasma cells"
-mac$cell_type[mac$seurat_clusters%in%c(8)]<-"cDC1 dendritic cells"
-mac$cell_type[mac$seurat_clusters%in%c(9)]<-"activated dendritic cells"
-mac$cell_type[mac$seurat_clusters%in%c(10)]<-"MHC-II high dendritic cell"
-library(tidyr)
-top10_table <- top10 %>%
-  filter(cluster %in% 0:9) %>%
-  group_by(cluster) %>%
-  mutate(rank=row_number()) %>%
-  pivot_wider(names_from = cluster,
-              values_from = gene)
-write.csv(top10_table, "cluster_top10_table.csv", row.names=FALSE)
+mac$cell_type[mac$seurat_clusters%in%c(0)]<-"LYVE1+ Res Mac"
+mac$cell_type[mac$seurat_clusters%in%c(1)]<-"SPP1+ Mac"
+mac$cell_type[mac$seurat_clusters%in%c(2)]<-"Monocyte-derived Mac"
+mac$cell_type[mac$seurat_clusters%in%c(3)]<-"cDC2"
+mac$cell_type[mac$seurat_clusters%in%c(4)]<-"LAMs"
+mac$cell_type[mac$seurat_clusters%in%c(5)]<-"Cycling myeloid cells"
+mac$cell_type[mac$seurat_clusters%in%c(6)]<-"cDC1"
+mac$cell_type[mac$seurat_clusters%in%c(7)]<-"Interstital Cells"
+DimPlot(mac, reduction = "umap", group.by = "cell_type",label = T, repel = T)
 
 #12.Go analysis
 # 按 cluster 拆分基因列表

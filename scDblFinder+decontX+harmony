@@ -1,0 +1,86 @@
+#!/usr/bin/env Rscript
+library(Seurat)
+library(scDblFinder)
+library(decontX)
+library(SingleCellExperiment)
+
+input_file <- commandArgs(trailingOnly = TRUE)[1]
+if (is.na(input_file)) stop("Usage: Rscript process_srat_batch.R <input.rds>")
+output_file <- sub("\\.rds$", "_cleaned.rds", input_file)
+
+cat("Processing:", input_file, "\n")
+srat <- readRDS(input_file)
+cat("Total cells:", ncol(srat), "\n")
+
+sample_list <- SplitObject(srat, split.by = "sample_id")
+processed_list <- list()
+
+for (sample_name in names(sample_list)) {
+  cat("\n--- Sample:", sample_name, "---\n")
+  obj <- sample_list[[sample_name]]
+  cat("Initial cells:", ncol(obj), "\n")
+
+  obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^MT-")
+  obj <- subset(obj, subset = nFeature_RNA > 300 & nFeature_RNA < 6000 &
+                          nCount_RNA > 500 & percent.mt < 20)
+  cat("After loose QC:", ncol(obj), "\n")
+  if (ncol(obj) < 100) next
+
+  counts_raw <- GetAssayData(obj, layer = "counts", assay = "RNA")
+  sce <- SingleCellExperiment(assays = list(counts = counts_raw))
+  sce <- scDblFinder(sce)
+  obj <- AddMetaData(obj, metadata = as.data.frame(colData(sce)[colnames(obj), ]))
+  obj <- subset(obj, subset = scDblFinder.class == "singlet")
+  rm(sce); gc()
+  cat("After doublet removal:", ncol(obj), "\n")
+  if (ncol(obj) < 100) next
+
+  counts_filtered <- GetAssayData(obj, layer = "counts", assay = "RNA")
+  sce_filtered <- SingleCellExperiment(assays = list(counts = counts_filtered))
+  temp <- CreateSeuratObject(counts = counts_filtered, meta.data = obj@meta.data)
+  temp <- NormalizeData(temp) %>% FindVariableFeatures(nfeatures = 1500) %>% ScaleData() %>%
+          RunPCA() %>% FindNeighbors(dims = 1:10) %>% FindClusters(resolution = 0.3)
+  sce_filtered$cluster <- Idents(temp)
+  sce_filtered <- decontX(sce_filtered, z = sce_filtered$cluster)
+  decont_counts <- assay(sce_filtered, "decontXcounts")
+  obj <- SetAssayData(obj, layer = "counts", assay = "RNA", new.data = decont_counts)
+  rm(sce_filtered, temp); gc()
+  cat("decontX completed.\n")
+
+  obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^MT-")
+  obj <- subset(obj, subset = nFeature_RNA > 500 & nFeature_RNA < 5000 &
+                          nCount_RNA > 800 & percent.mt < 5)
+  cat("After strict QC:", ncol(obj), "\n")
+
+  processed_list[[sample_name]] <- obj
+}
+
+processed_list <- processed_list[!sapply(processed_list, is.null)]
+srat_clean <- merge(processed_list[[1]], y = processed_list[-1])
+saveRDS(srat_clean, file = output_file)
+cat("\nSaved to", output_file, "\n")
+
+#!/usr/bin/env Rscript
+library(Seurat)
+library(harmony)
+
+srat1 <- readRDS("srat1_cleaned.rds")
+srat2 <- readRDS("srat2_raw_counts_cleaned.rds")
+
+srat1$batch <- "FAP"
+srat2$batch <- "MultiSample"
+
+merged <- merge(srat1, y = srat2)
+
+merged <- NormalizeData(merged) %>%
+  FindVariableFeatures(nfeatures = 2000) %>%
+  ScaleData(vars.to.regress = c("percent.mt", "nCount_RNA")) %>%
+  RunPCA()
+
+merged <- RunHarmony(merged, group.by.vars = "batch", reduction = "pca", assay.use = "RNA")
+
+merged <- RunUMAP(merged, reduction = "harmony", dims = 1:20) %>%
+  FindNeighbors(reduction = "harmony", dims = 1:20) %>%
+  FindClusters(resolution = 0.5)
+
+saveRDS(merged, file = "merged_harmony_final.rds")

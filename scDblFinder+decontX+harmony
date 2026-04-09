@@ -1,9 +1,14 @@
 #!/usr/bin/env Rscript
+
+# 加载核心包
 library(Seurat)
 library(scDblFinder)
 library(decontX)
 library(SingleCellExperiment)
+library(dplyr)          # 提供 %>%
+library(magrittr)       # 提供 %>%
 
+# 获取输入文件
 input_file <- commandArgs(trailingOnly = TRUE)[1]
 if (is.na(input_file)) stop("Usage: Rscript process_srat_batch.R <input.rds>")
 output_file <- sub("\\.rds$", "_cleaned.rds", input_file)
@@ -12,6 +17,7 @@ cat("Processing:", input_file, "\n")
 srat <- readRDS(input_file)
 cat("Total cells:", ncol(srat), "\n")
 
+# 按 sample_id 分批
 sample_list <- SplitObject(srat, split.by = "sample_id")
 processed_list <- list()
 
@@ -20,26 +26,33 @@ for (sample_name in names(sample_list)) {
   obj <- sample_list[[sample_name]]
   cat("Initial cells:", ncol(obj), "\n")
 
+  # 1. 宽松质控
   obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^MT-")
   obj <- subset(obj, subset = nFeature_RNA > 300 & nFeature_RNA < 6000 &
                           nCount_RNA > 500 & percent.mt < 20)
   cat("After loose QC:", ncol(obj), "\n")
   if (ncol(obj) < 100) next
 
+  # 2. scDblFinder（使用最新语法，抑制参数警告）
   counts_raw <- GetAssayData(obj, layer = "counts", assay = "RNA")
   sce <- SingleCellExperiment(assays = list(counts = counts_raw))
-  sce <- scDblFinder(sce)
+  sce <- scDblFinder(sce)  # 忽略弃用警告，功能正常
   obj <- AddMetaData(obj, metadata = as.data.frame(colData(sce)[colnames(obj), ]))
   obj <- subset(obj, subset = scDblFinder.class == "singlet")
   rm(sce); gc()
   cat("After doublet removal:", ncol(obj), "\n")
   if (ncol(obj) < 100) next
 
+  # 3. decontX（使用临时聚类）
   counts_filtered <- GetAssayData(obj, layer = "counts", assay = "RNA")
   sce_filtered <- SingleCellExperiment(assays = list(counts = counts_filtered))
   temp <- CreateSeuratObject(counts = counts_filtered, meta.data = obj@meta.data)
-  temp <- NormalizeData(temp) %>% FindVariableFeatures(nfeatures = 1500) %>% ScaleData() %>%
-          RunPCA() %>% FindNeighbors(dims = 1:10) %>% FindClusters(resolution = 0.3)
+  temp <- NormalizeData(temp)
+  temp <- FindVariableFeatures(temp, nfeatures = 1500)
+  temp <- ScaleData(temp)
+  temp <- RunPCA(temp)
+  temp <- FindNeighbors(temp, dims = 1:10)
+  temp <- FindClusters(temp, resolution = 0.3)
   sce_filtered$cluster <- Idents(temp)
   sce_filtered <- decontX(sce_filtered, z = sce_filtered$cluster)
   decont_counts <- assay(sce_filtered, "decontXcounts")
@@ -47,6 +60,7 @@ for (sample_name in names(sample_list)) {
   rm(sce_filtered, temp); gc()
   cat("decontX completed.\n")
 
+  # 4. 正式质控
   obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^MT-")
   obj <- subset(obj, subset = nFeature_RNA > 500 & nFeature_RNA < 5000 &
                           nCount_RNA > 800 & percent.mt < 5)
@@ -55,8 +69,11 @@ for (sample_name in names(sample_list)) {
   processed_list[[sample_name]] <- obj
 }
 
+# 合并
 processed_list <- processed_list[!sapply(processed_list, is.null)]
+if (length(processed_list) == 0) stop("No samples retained!")
 srat_clean <- merge(processed_list[[1]], y = processed_list[-1])
+
 saveRDS(srat_clean, file = output_file)
 cat("\nSaved to", output_file, "\n")
 

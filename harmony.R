@@ -19,7 +19,7 @@ load_or_run <- function(file_path, run_code_block) {
     cat(paste0("\n[COMPUTING] 未发现备份：", file_path, "，开始计算阶段任务...\n"))
     result <- run_code_block
     cat(paste0("[SAVING] 阶段任务完成，保存检查点至：", file_path, "\n"))
-    saveRDS(result, file = file_path, compress = FALSE) # 不压缩以换取保存速度
+    saveRDS(result, file = file_path, compress = TRUE) # 不压缩以换取保存速度
     return(result)
   }
 }
@@ -31,11 +31,14 @@ cat("=== Start Optimized Harmony pipeline with Checkpoints ===\n")
 # ===========================
 # 目标：生成处理好的 final_sample_list
 final_sample_list <- load_or_run("cp1_preprocessed_list.rds", {
-  files <- c("IMNM" = "imnm_ctrl_mac.rds", 
-             "IBM"  = "ibm_ctrl_mac.rds", 
-             "ASyS" = "asys_ctrl_mac.rds", 
-             "DM"   = "dm_ctrl_mac.rds")
-  
+  # files <- c("IMNM" = "IMNM_Macrophages_Cleaned.rds", 
+  #            "IBM"  = "IBM_Macrophages_Cleaned.rds", 
+  #            "ASyS" = "ASyS_Macrophages_Cleaned.rds", 
+  #            "DM"   = "DM_Macrophages_Cleaned.rds")
+  files <- c("IMNM" = "imnm_ctrl_mac.rds",
+             "IBM" = "ibm_ctrl_mac.rds",
+             "ASyS" = "asys_ctrl.mac.rds",
+             "DM" = "dm_ctrl_mac.rds")
   tmp_list <- list()
   for (nm in names(files)) {
     cat("  Reading", nm, "...\n")
@@ -91,15 +94,22 @@ merged <- load_or_run("cp3_pca_obj.rds", {
 })
 
 # ===========================
-# 阶段 4：Harmony 整合
+# 阶段 4：Harmony 整合 (修正版)
 # ===========================
 merged <- load_or_run("cp4_harmony_obj.rds", {
   cat("Running Harmony...\n")
-  merged <- RunHarmony(merged, group.by.vars = "sample_id", reduction = "pca", assay.use = "RNA")
+  
+  # 显式使用 object 参数，并且去掉可能的重复参数
+  merged <- RunHarmony(
+    object = merged, 
+    group.by.vars = "sample_id", 
+    reduction.save = "harmony", # 明确保存名称
+    assay.use = "RNA"
+  )
+  
   gc()
   merged
 })
-
 # ===========================
 # 阶段 5：UMAP 与 聚类（最终产物）
 # ===========================
